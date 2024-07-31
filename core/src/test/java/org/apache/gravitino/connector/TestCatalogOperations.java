@@ -20,12 +20,12 @@ package org.apache.gravitino.connector;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
+import java.io.File;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.stream.Collectors;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.Catalog;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
@@ -52,6 +52,7 @@ import org.apache.gravitino.file.Fileset;
 import org.apache.gravitino.file.FilesetCatalog;
 import org.apache.gravitino.file.FilesetChange;
 import org.apache.gravitino.file.FilesetContext;
+import org.apache.gravitino.file.FilesetDataOperation;
 import org.apache.gravitino.file.FilesetDataOperationCtx;
 import org.apache.gravitino.messaging.DataLayout;
 import org.apache.gravitino.messaging.Topic;
@@ -83,6 +84,8 @@ public class TestCatalogOperations
   public static final String FAIL_CREATE = "fail-create";
 
   public static final String FAIL_TEST = "need-fail";
+
+  private static final String SLASH = "/";
 
   public TestCatalogOperations(Map<String, String> config) {
     tables = Maps.newHashMap();
@@ -443,21 +446,35 @@ public class TestCatalogOperations
 
   @Override
   public FilesetContext getFilesetContext(NameIdentifier ident, FilesetDataOperationCtx ctx) {
-    String subPath = ctx.subPath();
-    Preconditions.checkArgument(subPath != null, "subPath must not be null");
+    Preconditions.checkArgument(ctx.subPath() != null, "subPath must not be null");
+    // fill the sub path with a leading slash if it does not have one
+    String subPath;
+    if (!ctx.subPath().trim().startsWith(SLASH)) {
+      subPath = SLASH + ctx.subPath().trim();
+    } else {
+      subPath = ctx.subPath().trim();
+    }
 
     Fileset fileset = loadFileset(ident);
 
-    String storageLocation = fileset.storageLocation();
+    boolean isMountFile = checkMountsSingleFile(fileset);
+    Preconditions.checkArgument(ctx.operation() != null, "operation must not be null.");
+    if (ctx.operation() == FilesetDataOperation.RENAME) {
+      Preconditions.checkArgument(
+          subPath.startsWith(SLASH) && subPath.length() > 1,
+          "subPath cannot be blank when need to rename a file or a directory.");
+      Preconditions.checkArgument(
+          !isMountFile,
+          String.format(
+              "Cannot rename the fileset: %s which only mounts to a single file.", ident));
+    }
+
     String actualPath;
-    // subPath cannot be null, so we only need check if it is blank
-    if (StringUtils.isBlank(subPath)) {
-      actualPath = storageLocation;
+    // subPath cannot be null, so we only need check if it is just with "/"
+    if (subPath.startsWith(SLASH) && subPath.length() == 1) {
+      actualPath = fileset.storageLocation();
     } else {
-      actualPath =
-          subPath.startsWith("/")
-              ? String.format("%s%s", storageLocation, subPath)
-              : String.format("%s/%s", storageLocation, subPath);
+      actualPath = fileset.storageLocation() + subPath;
     }
 
     return TestFilesetContext.builder()
@@ -575,6 +592,15 @@ public class TestCatalogOperations
       Map<String, String> properties) {
     if ("true".equals(properties.get(FAIL_TEST))) {
       throw new ConnectionFailedException("Connection failed");
+    }
+  }
+
+  private boolean checkMountsSingleFile(Fileset fileset) {
+    try {
+      File locationPath = new File(fileset.storageLocation());
+      return locationPath.isFile();
+    } catch (Exception e) {
+      return false;
     }
   }
 }
